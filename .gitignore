@@ -1,0 +1,16 @@
+# ── Secrets (NEVER commit) ─────────────────────────
+.env
+cf-token
+*.pem
+*.key
+
+# ── Rendered config (generated from templates/ by `just render`) ─────
+/config/traefik.yml
+/config/config.yml
+/acme.json
+config/acme.json
+
+# ── Logs & scratch ─────────────────────────────────
+logs/
+*.log
+.tmp/

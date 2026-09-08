@@ -1,0 +1,78 @@
+---
+# Traefik v3 reverse proxy — fully env-driven.
+#
+#   * Values come from .env (see .env.example). Compose interpolates ${VAR} /
+#     ${VAR:-default} natively; the ACME-backed configs are rendered from
+#     templates/ into config/ by `just render` before the container starts.
+#   * The Cloudflare token is a Docker secret (./cf-token) — it never appears
+#     in .env, labels, or environment.
+name: traefik
+
+secrets:
+  cf-token:
+    file: ./cf-token
+
+services:
+  traefik:
+    image: "${TRAEFIK_IMAGE:-traefik}:${TRAEFIK_TAG:-v3.7}" # pin the minor tag; avoid `latest` in production
+    container_name: traefik
+    restart: always # survives daemon restarts; honors an explicit `docker stop`
+    security_opt:
+      - no-new-privileges=true
+    secrets:
+      - cf-token
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      proxy:
+        ipv4_address: ${TRAEFIK_IP:-172.18.0.254} # stable address for backends that reference Traefik by IP; must fall inside PROXY_SUBNET
+    ports:
+      - "${ENTRYPOINT_HTTPS_PORT:-443}:443"
+      # - "80:80" # not needed: certs use the DNS-01 challenge, so port 80 stays closed
+    environment:
+      # Point Traefik at the secret file; the token itself never enters the env.
+      - CF_DNS_API_TOKEN_FILE=/run/secrets/cf-token
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Docker provider (labels) — read-only
+      # Rendered at deploy time from templates/ by `just render`:
+      - ./config/traefik.yml:/traefik.yml:ro
+      - ./config/config.yml:/config.yml:ro
+      # ACME state persists in a named volume (survives container recreation):
+      - traefik-certs:/etc/traefik/acme
+      # - ./logs:/var/log/traefik # enable file logging (see templates/traefik.yml.tpl)
+    labels:
+      - "traefik.enable=true"
+      
+      # 1. Dashboard Router
+      - "traefik.http.routers.traefik-secure.entrypoints=https"
+      - "traefik.http.routers.traefik-secure.rule=Host(`${DASHBOARD_SUBDOMAIN}.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-secure.tls=true"
+      - "traefik.http.routers.traefik-secure.tls.certresolver=cloudflare"
+      
+      # # ⭐ ADD THESE 2 LINES HERE TO FETCH A WILDCARD
+      # - "traefik.http.routers.traefik-secure.tls.domains[0].main=${DOMAIN}"
+      # - "traefik.http.routers.traefik-secure.tls.domains[0].sans=*.{DOMAIN}"
+
+      # 2. Attach Middlewares
+      - "traefik.http.routers.traefik-secure.middlewares=traefik-auth,sslheader"
+      
+      # 3. Define Middlewares
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_CREDENTIALS}"
+      - "traefik.http.middlewares.sslheader.headers.customrequestheaders.X-Forwarded-Proto=https"
+      
+      # 4. Point to internal API
+      - "traefik.http.routers.traefik-secure.service=api@internal"
+      - "traefik.http.services.traefik-secure.loadbalancer.server.port=8080"
+
+networks:
+  proxy: # shared network — created by `just bootstrap` (or manually via docker network create)
+    name: ${PROXY_NETWORK:-proxy}
+    external: true
+
+volumes:
+  traefik-certs:
+    name: ${CERTS_VOLUME:-traefik-certs} # explicit name => predictable backups
